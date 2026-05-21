@@ -38,10 +38,9 @@ def is_logged_in() -> bool:
 
 
 def require_auth():
-    """Stop page rendering and show a prompt if not authenticated."""
+    """Redirect to login page if not authenticated."""
     if not is_logged_in():
-        st.warning("Please log in first via the **Home** page.")
-        st.stop()
+        st.switch_page("app.py")
 
 
 def render_sidebar():

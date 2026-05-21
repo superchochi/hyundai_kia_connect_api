@@ -169,6 +169,8 @@ cookies = CookieController(key="kc_ctrl")
 
 if not st.session_state.logged_in and not st.session_state._session_checked:
     all_cookies = cookies.getAll()
+    if all_cookies is None:
+        st.stop()  # CookieController not yet loaded; re-run imminent
     if all_cookies is not None:
         st.session_state._session_checked = True
         raw = all_cookies.get(_COOKIE_NAME)
@@ -254,13 +256,14 @@ with center:
             brand = st.selectbox("Brand", options=list(BRANDS.keys()),
                                  format_func=lambda k: BRANDS[k])
 
-        email = st.text_input("Email / Username", placeholder="your@email.com")
-        password = st.text_input("Password", type="password")
+        email = st.text_input("Email / Username", placeholder="your@email.com", autocomplete="username")
+        password = st.text_input("Password", type="password", autocomplete="current-password")
         pin = st.text_input("PIN (optional)", type="password",
-                            placeholder="Required for some regions (CA, USA)")
+                            placeholder="Required for some regions (CA, USA)",
+                            autocomplete="off")
 
         with st.expander("⚙️ Location lookup (optional)"):
-            geocode_enable = st.checkbox("Enable reverse geocoding")
+            geocode_enable = st.checkbox("Enable reverse geocoding", value=True)
             geocode_provider = st.radio("Provider", options=list(GEO_LOCATION_PROVIDERS.keys()),
                                         format_func=lambda k: GEO_LOCATION_PROVIDERS[k].title(),
                                         horizontal=True)
