@@ -46,21 +46,24 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ── Fernet encryption (module-level singleton) ─────────────────────────────────
+# ── Fernet encryption ──────────────────────────────────────────────────────────
 
-_fernet: Fernet | None = None
+_DEV_KEY_PATH = os.path.join(_HERE, ".cookie_key")
 
 
 def _get_fernet() -> Fernet:
-    global _fernet
-    if _fernet is None:
-        key = os.environ.get("COOKIE_KEY")
-        if key:
-            _fernet = Fernet(key.encode() if isinstance(key, str) else key)
-        else:
-            # Per-process key: cookies won't survive server restarts without COOKIE_KEY
-            _fernet = Fernet(Fernet.generate_key())
-    return _fernet
+    key = os.environ.get("COOKIE_KEY")
+    if key:
+        return Fernet(key.encode() if isinstance(key, str) else key)
+    # Local dev: persist a generated key to disk so it survives page reloads.
+    if os.path.exists(_DEV_KEY_PATH):
+        with open(_DEV_KEY_PATH, "rb") as f:
+            dev_key = f.read().strip()
+    else:
+        dev_key = Fernet.generate_key()
+        with open(_DEV_KEY_PATH, "wb") as f:
+            f.write(dev_key)
+    return Fernet(dev_key)
 
 
 # ── Cookie helpers ─────────────────────────────────────────────────────────────
@@ -95,8 +98,19 @@ def _clear_cookie(cookies: CookieController) -> None:
 def _restore_from_cookie(
     cookies: CookieController, raw: str
 ) -> tuple[VehicleManager, int, int] | None:
+    """Decrypt cookie and rebuild a logged-in VehicleManager.
+
+    Returns None on failure. Cookie is cleared only on auth/decrypt failure,
+    not on transient errors — that way a flaky network won't log the user out.
+    """
     try:
         data = json.loads(_get_fernet().decrypt(raw.encode()).decode())
+    except Exception:
+        # Cookie is corrupt or encrypted with a different key — drop it.
+        _clear_cookie(cookies)
+        return None
+
+    try:
         valid_until_str = data.get("valid_until", "")
         valid_until = datetime.datetime.fromisoformat(valid_until_str) if valid_until_str else None
         token = Token(
@@ -116,13 +130,19 @@ def _restore_from_cookie(
             username=data.get("username", ""), password="", pin="",
             token=token,
         )
+        prev_valid_until = token.valid_until
         vm.check_and_refresh_token()
         vm.initialize_vehicles()
         vm.update_all_vehicles_with_cached_state()
-        _save_cookie(cookies, vm, region, brand)
+        # Re-save only if the token was actually refreshed.
+        if vm.token.valid_until != prev_valid_until:
+            _save_cookie(cookies, vm, region, brand)
         return vm, region, brand
-    except Exception:
+    except AuthenticationError:
         _clear_cookie(cookies)
+        return None
+    except Exception:
+        # Transient (network, API) — keep the cookie so we can retry next load.
         return None
 
 
@@ -138,6 +158,7 @@ def _init_state() -> None:
         "_otp_region": None,
         "_otp_brand": None,
         "_session_checked": False,
+        "_cookie_attempts": 0,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -167,22 +188,32 @@ def _do_logout(cookies: CookieController) -> None:
 _init_state()
 cookies = CookieController(key="kc_ctrl")
 
+# Cookie restoration:
+#   - Render 1 of a fresh page load: getAll() returns {} (controller still mounting).
+#   - Render 2 (after controller reports cookies): getAll() returns the real dict.
+# We must NOT mark _session_checked until we've either restored or proven there's
+# no cookie to restore. Empty dict on render 1 looks identical to "no cookie",
+# so we wait one extra render before giving up.
 if not st.session_state.logged_in and not st.session_state._session_checked:
-    all_cookies = cookies.getAll()
-    if all_cookies is None:
-        st.stop()  # CookieController not yet loaded; re-run imminent
-    if all_cookies is not None:
+    raw = (cookies.getAll() or {}).get(_COOKIE_NAME)
+    if raw:
+        st.session_state._session_checked = True  # only retry once
+        with st.spinner("Restoring session…"):
+            restored = _restore_from_cookie(cookies, raw)
+        if restored:
+            vm, region, brand = restored
+            st.session_state.vm = vm
+            st.session_state.vehicles = list(vm.vehicles.values())
+            st.session_state.logged_in = True
+            st.rerun()
+    else:
+        # No cookie visible yet. Could be (a) controller still loading, or (b) no
+        # cookie exists. Give the controller one chance to deliver before falling
+        # through to the login form.
+        if st.session_state._cookie_attempts < 1:
+            st.session_state._cookie_attempts += 1
+            st.stop()
         st.session_state._session_checked = True
-        raw = all_cookies.get(_COOKIE_NAME)
-        if raw:
-            with st.spinner("Restoring session…"):
-                restored = _restore_from_cookie(cookies, raw)
-            if restored:
-                vm, region, brand = restored
-                st.session_state.vm = vm
-                st.session_state.vehicles = list(vm.vehicles.values())
-                st.session_state.logged_in = True
-                st.rerun()
 
 # ── Already logged in ──────────────────────────────────────────────────────────
 
@@ -260,7 +291,7 @@ with center:
         password = st.text_input("Password", type="password", autocomplete="current-password")
         pin = st.text_input("PIN (optional)", type="password",
                             placeholder="Required for some regions (CA, USA)",
-                            autocomplete="off")
+                            autocomplete="one-time-code")
 
         with st.expander("⚙️ Location lookup (optional)"):
             geocode_enable = st.checkbox("Enable reverse geocoding", value=True)
@@ -268,6 +299,7 @@ with center:
                                         format_func=lambda k: GEO_LOCATION_PROVIDERS[k].title(),
                                         horizontal=True)
             geocode_key = st.text_input("Google API Key", type="password",
+                                        autocomplete="one-time-code",
                                         help="Only required when Google is selected as provider")
 
         submitted = st.form_submit_button("🔑 Sign in", width="stretch", type="primary")
