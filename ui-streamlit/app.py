@@ -24,7 +24,6 @@ from hyundai_kia_connect_api.exceptions import AuthenticationError
 
 _COOKIE_NAME = "kc_session"
 _COOKIE_MAX_AGE = 7 * 24 * 3600  # 7 days
-_PRODUCTION = bool(os.environ.get("COOKIE_KEY"))  # True when COOKIE_KEY is set (cloud deployment)
 
 st.set_page_config(
     page_title="Hyundai / Kia Connect",
@@ -80,10 +79,11 @@ def _save_cookie(cookies: CookieController, vm: VehicleManager, region: int, bra
         "valid_until": t.valid_until.isoformat() if t.valid_until else "",
     }
     encrypted = _get_fernet().encrypt(json.dumps(data).encode()).decode()
+    # No `secure=True` — Fernet already encrypts the payload, and over HTTP
+    # (local dev) the browser would reject a secure cookie outright.
     cookies.set(
         _COOKIE_NAME, encrypted,
         max_age=_COOKIE_MAX_AGE,
-        secure=_PRODUCTION,
         same_site="strict",
     )
 
@@ -134,9 +134,10 @@ def _restore_from_cookie(
         vm.check_and_refresh_token()
         vm.initialize_vehicles()
         vm.update_all_vehicles_with_cached_state()
-        # Re-save only if the token was actually refreshed.
+        # If the token was refreshed, request a deferred cookie save so the
+        # write reaches the browser without being clipped by st.rerun().
         if vm.token.valid_until != prev_valid_until:
-            _save_cookie(cookies, vm, region, brand)
+            st.session_state._needs_cookie_save = True
         return vm, region, brand
     except AuthenticationError:
         _clear_cookie(cookies)
@@ -159,6 +160,9 @@ def _init_state() -> None:
         "_otp_brand": None,
         "_session_checked": False,
         "_cookie_attempts": 0,
+        "_region": None,
+        "_brand": None,
+        "_needs_cookie_save": False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -166,11 +170,16 @@ def _init_state() -> None:
 
 
 def _apply_login(cookies: CookieController, vm: VehicleManager, region: int, brand: int) -> None:
-    _save_cookie(cookies, vm, region, brand)
+    # Don't save the cookie here — st.rerun() that follows would discard the
+    # cookie-controller component message. Defer to the logged-in view, which
+    # renders cleanly without an immediate rerun.
     st.session_state.vm = vm
     st.session_state.vehicles = list(vm.vehicles.values())
     st.session_state.logged_in = True
     st.session_state.otp_pending = False
+    st.session_state._region = region
+    st.session_state._brand = brand
+    st.session_state._needs_cookie_save = True
 
 
 def _do_logout(cookies: CookieController) -> None:
@@ -181,6 +190,7 @@ def _do_logout(cookies: CookieController) -> None:
     st.session_state.selected_vehicle_id = None
     st.session_state.otp_pending = False
     st.session_state._session_checked = False
+    st.session_state._needs_cookie_save = False
 
 
 # ── Bootstrap ──────────────────────────────────────────────────────────────────
@@ -205,6 +215,8 @@ if not st.session_state.logged_in and not st.session_state._session_checked:
             st.session_state.vm = vm
             st.session_state.vehicles = list(vm.vehicles.values())
             st.session_state.logged_in = True
+            st.session_state._region = region
+            st.session_state._brand = brand
             st.rerun()
     else:
         # No cookie visible yet. Could be (a) controller still loading, or (b) no
@@ -218,6 +230,16 @@ if not st.session_state.logged_in and not st.session_state._session_checked:
 # ── Already logged in ──────────────────────────────────────────────────────────
 
 if st.session_state.logged_in:
+    # Persist the cookie now that the page is rendering normally (no immediate
+    # rerun pending). The cookie-controller component message reaches the
+    # browser as part of this render's deltas.
+    if st.session_state._needs_cookie_save and st.session_state.vm is not None:
+        _save_cookie(
+            cookies, st.session_state.vm,
+            st.session_state._region, st.session_state._brand,
+        )
+        st.session_state._needs_cookie_save = False
+
     vehicles = st.session_state.vehicles
     st.markdown('<div class="brand-title">🚗 Hyundai / Kia Connect</div>', unsafe_allow_html=True)
     st.success(f"Logged in · {len(vehicles)} vehicle(s) found")
