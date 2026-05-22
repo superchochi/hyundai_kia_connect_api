@@ -73,6 +73,7 @@ def _save_cookie(cookies: CookieController, vm: VehicleManager, region: int, bra
         "region": region,
         "brand": brand,
         "username": t.username or "",
+        "pin": t.pin or "",
         "access_token": t.access_token or "",
         "refresh_token": t.refresh_token or "",
         "device_id": t.device_id or "",
@@ -116,18 +117,18 @@ def _restore_from_cookie(
         token = Token(
             username=data.get("username", ""),
             password="",
+            pin=data.get("pin", ""),
             access_token=data.get("access_token", ""),
             refresh_token=data.get("refresh_token", ""),
             device_id=data.get("device_id"),
             valid_until=valid_until,
             stamp=None,
-            pin="",
         )
         region = int(data["region"])
         brand = int(data["brand"])
         vm = VehicleManager(
             region=region, brand=brand,
-            username=data.get("username", ""), password="", pin="",
+            username=data.get("username", ""), password="", pin=data.get("pin", ""),
             token=token,
         )
         prev_valid_until = token.valid_until
@@ -163,6 +164,7 @@ def _init_state() -> None:
         "_region": None,
         "_brand": None,
         "_needs_cookie_save": False,
+        "_redirect_after_login": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -239,6 +241,11 @@ if st.session_state.logged_in:
             st.session_state._region, st.session_state._brand,
         )
         st.session_state._needs_cookie_save = False
+
+    redirect = st.session_state._redirect_after_login
+    if redirect:
+        st.session_state._redirect_after_login = None
+        st.switch_page(redirect)
 
     vehicles = st.session_state.vehicles
     st.markdown('<div class="brand-title">🚗 Hyundai / Kia Connect</div>', unsafe_allow_html=True)

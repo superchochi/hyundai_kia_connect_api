@@ -16,6 +16,7 @@ import streamlit as st
 from utils.session import render_sidebar, get_vm
 from hyundai_kia_connect_api import ClimateRequestOptions, WindowRequestOptions
 from hyundai_kia_connect_api.const import WINDOW_STATE, ORDER_STATUS
+from hyundai_kia_connect_api.exceptions import DuplicateRequestError
 
 st.set_page_config(page_title="Controls", page_icon="🎛️", layout="wide")
 
@@ -35,6 +36,12 @@ def _send(label: str, fn, *args, **kwargs):
             action_id = fn(*args, **kwargs)
             st.success(f"✅ **{label}** sent. Action ID: `{action_id}`")
             return action_id
+        except DuplicateRequestError:
+            st.warning(
+                "⏳ A previous command is still pending. "
+                "Wait 30–60 seconds for the car to respond, then try again."
+            )
+            return None
         except Exception as e:
             st.error(f"❌ **{label}** failed: {e}")
             return None
@@ -71,7 +78,7 @@ with tabs[0]:
     with col1:
         st.markdown("#### 🔒 Lock Vehicle")
         st.caption("Sends a lock command to all doors.")
-        wait_lock = st.checkbox("Wait for confirmation", value=False, key="wait_lock")
+        wait_lock = st.checkbox("Wait for confirmation", value=True, key="wait_lock")
         if st.button("🔒 Lock", width="stretch", type="primary", key="btn_lock"):
             aid = _send("Lock", vm.lock, vehicle.id)
             if wait_lock and aid:
@@ -79,7 +86,7 @@ with tabs[0]:
     with col2:
         st.markdown("#### 🔓 Unlock Vehicle")
         st.caption("Sends an unlock command to all doors.")
-        wait_unlock = st.checkbox("Wait for confirmation", value=False, key="wait_unlock")
+        wait_unlock = st.checkbox("Wait for confirmation", value=True, key="wait_unlock")
         if st.button("🔓 Unlock", width="stretch", key="btn_unlock"):
             aid = _send("Unlock", vm.unlock, vehicle.id)
             if wait_unlock and aid:
@@ -119,7 +126,7 @@ with tabs[1]:
                 rr_seat = st.number_input("Rear R", 0, 8, 0, key="s_rr")
 
             steer = st.number_input("Steering Wheel Heater (0=off)", 0, 3, 0, key="steer")
-            wait_climate = st.checkbox("Wait for vehicle confirmation")
+            wait_climate = st.checkbox("Wait for vehicle confirmation", value=True)
 
             start_submitted = st.form_submit_button("▶️ Start Climate", type="primary", width="stretch")
 
@@ -170,6 +177,7 @@ with tabs[2]:
                     window_selections[key] = _state_values[idx]
 
             win_submitted = st.form_submit_button("🪟 Apply Window States", type="primary", width="stretch")
+            wait_windows = st.checkbox("Wait for confirmation", value=True, key="wait_windows")
 
         if win_submitted:
             def _ws(v):
@@ -180,7 +188,9 @@ with tabs[2]:
                 back_left=_ws(window_selections["rl"]),
                 back_right=_ws(window_selections["rr"]),
             )
-            _send("Window Control", vm.set_windows_state, vehicle.id, opts)
+            aid = _send("Window Control", vm.set_windows_state, vehicle.id, opts)
+            if wait_windows and aid:
+                _poll_status(aid)
 
 # ── Alerts ─────────────────────────────────────────────────────────────────────
 with tabs[3]:

@@ -1,6 +1,7 @@
 """Session state management and shared sidebar component."""
 from __future__ import annotations
 
+import inspect
 import os
 import sys
 
@@ -37,15 +38,24 @@ def is_logged_in() -> bool:
     return st.session_state.get("logged_in", False)
 
 
-def require_auth():
-    """Redirect to login page if not authenticated."""
+def require_auth(current_page: str | None = None):
+    """Redirect to login page if not authenticated, saving the intended destination."""
     if not is_logged_in():
+        if current_page:
+            st.session_state._redirect_after_login = current_page
         st.switch_page("app.py")
 
 
 def render_sidebar():
     """Render the vehicle selector and status in the sidebar. Returns selected vehicle."""
-    require_auth()
+    # Auto-detect calling page path so login can redirect back here.
+    caller_file = inspect.stack()[1].filename
+    _ui_root = os.path.abspath(os.path.join(_HERE, ".."))
+    try:
+        current_page = os.path.relpath(caller_file, _ui_root)
+    except ValueError:
+        current_page = None
+    require_auth(current_page)
     vehicles = get_vehicles()
     if not vehicles:
         st.sidebar.warning("No vehicles found.")
