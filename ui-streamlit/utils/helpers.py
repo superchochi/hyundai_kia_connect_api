@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timezone
+from typing import Any
 
 
 def fmt_val(value, unit: str = "", fallback: str = "—") -> str:
@@ -121,3 +122,17 @@ def door_lock_status(is_locked: bool | None) -> str:
     if is_locked is None:
         return "⚪"
     return "🔒" if is_locked else "🔓"
+
+
+def chart_layout(**extra: Any) -> dict:
+    """Base Plotly layout for in-app charts.
+
+    Uses transparent backgrounds so charts blend into any Streamlit theme.
+    Pass keyword args to override or extend (e.g. title, barmode, yaxis_title).
+    """
+    base: dict = {
+        "plot_bgcolor": "rgba(0,0,0,0)",
+        "paper_bgcolor": "rgba(0,0,0,0)",
+    }
+    base.update(extra)
+    return base

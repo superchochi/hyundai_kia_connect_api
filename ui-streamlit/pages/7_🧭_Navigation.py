@@ -4,12 +4,8 @@ from __future__ import annotations
 import os
 import sys
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
-_UI   = os.path.abspath(os.path.join(_HERE, ".."))
-for p in (_ROOT, _UI):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # ui-streamlit/
+from utils import _bootstrap  # noqa: F401  (adds repo root for hyundai_kia_connect_api)
 
 import streamlit as st
 
@@ -85,7 +81,7 @@ if submitted:
                 st.error(f"Failed: {e}")
 
 # ── Quick location picker from vehicle position ────────────────────────────────
-if vehicle.location_latitude and vehicle.location_longitude:
+if vehicle.location_latitude is not None and vehicle.location_longitude is not None:
     st.divider()
     st.subheader("📍 Current Vehicle Position")
     lat = vehicle.location_latitude
@@ -96,7 +92,6 @@ if vehicle.location_latitude and vehicle.location_longitude:
 
         m = folium.Map(location=[lat, lon], zoom_start=14, tiles="CartoDB dark_matter")
         folium.Marker([lat, lon], popup="Vehicle", icon=folium.Icon(color="blue", icon="car", prefix="fa")).add_to(m)
-        st.caption("Click the map to copy coordinates into the waypoint form above.")
         st_folium(m, width="100%", height=300, returned_objects=[])
     except ImportError:
         st.info(f"Vehicle is at {lat:.5f}, {lon:.5f}")

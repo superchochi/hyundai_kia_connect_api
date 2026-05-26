@@ -6,11 +6,8 @@ import json
 import os
 import sys
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.abspath(os.path.join(_HERE, ".."))
-for p in (_ROOT, _HERE):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # ui-streamlit/
+from utils import _bootstrap  # noqa: F401  (adds repo root for hyundai_kia_connect_api)
 
 import streamlit as st
 from cryptography.fernet import Fernet
@@ -47,7 +44,7 @@ st.markdown("""
 
 # ── Fernet encryption ──────────────────────────────────────────────────────────
 
-_DEV_KEY_PATH = os.path.join(_HERE, ".cookie_key")
+_DEV_KEY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cookie_key")
 
 
 def _get_fernet() -> Fernet:
@@ -78,6 +75,9 @@ def _save_cookie(cookies: CookieController, vm: VehicleManager, region: int, bra
         "refresh_token": t.refresh_token or "",
         "device_id": t.device_id or "",
         "valid_until": t.valid_until.isoformat() if t.valid_until else "",
+        "geocode_api_enable": vm.geocode_api_enable,
+        "geocode_provider": vm.geocode_provider,
+        "geocode_api_key": vm.geocode_api_key or "",
     }
     encrypted = _get_fernet().encrypt(json.dumps(data).encode()).decode()
     # No `secure=True` — Fernet already encrypts the payload, and over HTTP
@@ -130,6 +130,9 @@ def _restore_from_cookie(
             region=region, brand=brand,
             username=data.get("username", ""), password="", pin=data.get("pin", ""),
             token=token,
+            geocode_api_enable=data.get("geocode_api_enable", False),
+            geocode_provider=data.get("geocode_provider", 1),
+            geocode_api_key=data.get("geocode_api_key") or None,
         )
         prev_valid_until = token.valid_until
         vm.check_and_refresh_token()
@@ -269,13 +272,19 @@ if st.session_state.otp_pending:
     with c1:
         if st.button("📧 Send via Email", width="stretch"):
             with st.spinner("Sending…"):
-                vm.send_otp(OTP_NOTIFY_TYPE.EMAIL)
-            st.success("OTP sent via email")
+                try:
+                    vm.send_otp(OTP_NOTIFY_TYPE.EMAIL)
+                    st.success("OTP sent via email")
+                except Exception as e:
+                    st.error(f"❌ Failed to send OTP: {e}")
     with c2:
         if st.button("📱 Send via SMS", width="stretch"):
             with st.spinner("Sending…"):
-                vm.send_otp(OTP_NOTIFY_TYPE.SMS)
-            st.success("OTP sent via SMS")
+                try:
+                    vm.send_otp(OTP_NOTIFY_TYPE.SMS)
+                    st.success("OTP sent via SMS")
+                except Exception as e:
+                    st.error(f"❌ Failed to send OTP: {e}")
 
     with st.form("otp_form"):
         otp_code = st.text_input("OTP code", placeholder="123456", max_chars=10)
@@ -292,7 +301,7 @@ if st.session_state.otp_pending:
                         _apply_login(cookies, vm, st.session_state._otp_region, st.session_state._otp_brand)
                         st.rerun()
                     except Exception as e:
-                        st.error(f"OTP failed: {e}")
+                        st.error(f"❌ OTP verification failed: {e}")
 
     if st.button("← Back"):
         st.session_state.otp_pending = False
@@ -359,6 +368,6 @@ if submitted:
                     st.session_state._otp_brand = brand
                     st.rerun()
             except AuthenticationError as e:
-                st.error(f"Authentication failed: {e}")
+                st.error(f"❌ Authentication failed: {e}")
             except Exception as e:
-                st.error(f"Error: {e}")
+                st.error(f"❌ Login error: {e}")

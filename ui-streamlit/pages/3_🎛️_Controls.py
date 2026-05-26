@@ -4,19 +4,16 @@ from __future__ import annotations
 import os
 import sys
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
-_UI = os.path.abspath(os.path.join(_HERE, ".."))
-for p in (_ROOT, _UI):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # ui-streamlit/
+from utils import _bootstrap  # noqa: F401  (adds repo root for hyundai_kia_connect_api)
 
 import streamlit as st
 
 from utils.session import render_sidebar, get_vm
+from utils.commands import send_command
+from utils.helpers import lock_status, status_dot
 from hyundai_kia_connect_api import ClimateRequestOptions, WindowRequestOptions
 from hyundai_kia_connect_api.const import WINDOW_STATE, ORDER_STATUS
-from hyundai_kia_connect_api.exceptions import DuplicateRequestError
 
 st.set_page_config(page_title="Controls", page_icon="🎛️", layout="wide")
 
@@ -27,24 +24,6 @@ if vehicle is None:
 vm = get_vm()
 st.title("🎛️ Controls")
 st.caption(f"{vehicle.name} · {vehicle.model}")
-
-
-def _send(label: str, fn, *args, **kwargs):
-    """Execute a command and show a status message."""
-    with st.spinner(f"Sending {label}…"):
-        try:
-            action_id = fn(*args, **kwargs)
-            st.success(f"✅ **{label}** sent. Action ID: `{action_id}`")
-            return action_id
-        except DuplicateRequestError:
-            st.warning(
-                "⏳ A previous command is still pending. "
-                "Wait 30–60 seconds for the car to respond, then try again."
-            )
-            return None
-        except Exception as e:
-            st.error(f"❌ **{label}** failed: {e}")
-            return None
 
 
 def _poll_status(action_id: str):
@@ -65,11 +44,14 @@ def _poll_status(action_id: str):
             st.warning(f"Could not check action status: {e}")
 
 
-tabs = st.tabs(["🔒 Lock / Unlock", "🌡️ Climate", "🪟 Windows", "🚨 Alerts", "🅿️ Valet"])
+_TABS = ["🔒 Lock / Unlock", "🌡️ Climate", "🪟 Windows", "🚨 Alerts", "🅿️ Valet"]
+tab = st.segmented_control("Section", _TABS, default=_TABS[0], key="controls_tab", label_visibility="collapsed")
+if tab is None:
+    tab = _TABS[0]
+st.divider()
 
 # ── Lock / Unlock ──────────────────────────────────────────────────────────────
-with tabs[0]:
-    from utils.helpers import lock_status
+if tab == _TABS[0]:
     st.subheader("Door Lock")
     st.markdown(f"**Current status:** {lock_status(vehicle.is_locked)}")
     st.divider()
@@ -80,22 +62,23 @@ with tabs[0]:
         st.caption("Sends a lock command to all doors.")
         wait_lock = st.checkbox("Wait for confirmation", value=True, key="wait_lock")
         if st.button("🔒 Lock", width="stretch", type="primary", key="btn_lock"):
-            aid = _send("Lock", vm.lock, vehicle.id)
+            aid = send_command("Lock", vm.lock, vehicle.id)
             if wait_lock and aid:
                 _poll_status(aid)
     with col2:
         st.markdown("#### 🔓 Unlock Vehicle")
         st.caption("Sends an unlock command to all doors.")
         wait_unlock = st.checkbox("Wait for confirmation", value=True, key="wait_unlock")
-        if st.button("🔓 Unlock", width="stretch", key="btn_unlock"):
-            aid = _send("Unlock", vm.unlock, vehicle.id)
-            if wait_unlock and aid:
-                _poll_status(aid)
+        with st.popover("🔓 Unlock", use_container_width=True):
+            st.warning("Unlock all doors?")
+            if st.button("Yes, unlock", type="primary", key="btn_unlock_confirm"):
+                aid = send_command("Unlock", vm.unlock, vehicle.id)
+                if wait_unlock and aid:
+                    _poll_status(aid)
 
 # ── Climate ────────────────────────────────────────────────────────────────────
-with tabs[1]:
+elif tab == _TABS[1]:
     st.subheader("Climate Control")
-    from utils.helpers import status_dot
     st.markdown(f"**A/C currently:** {status_dot(vehicle.air_control_is_on, 'On', 'Off')}")
     st.divider()
 
@@ -127,7 +110,6 @@ with tabs[1]:
 
             steer = st.number_input("Steering Wheel Heater (0=off)", 0, 3, 0, key="steer")
             wait_climate = st.checkbox("Wait for vehicle confirmation", value=True)
-
             start_submitted = st.form_submit_button("▶️ Start Climate", type="primary", width="stretch")
 
         if start_submitted:
@@ -143,7 +125,7 @@ with tabs[1]:
                 rear_right_seat=rr_seat,
                 steering_wheel=steer,
             )
-            aid = _send("Start Climate", vm.start_climate, vehicle.id, opts)
+            aid = send_command("Start Climate", vm.start_climate, vehicle.id, opts)
             if wait_climate and aid:
                 _poll_status(aid)
 
@@ -151,10 +133,10 @@ with tabs[1]:
         st.markdown("#### Stop Climate")
         st.caption("Turns off the remote climate control.")
         if st.button("⏹️ Stop Climate", width="stretch", key="btn_stop_climate"):
-            _send("Stop Climate", vm.stop_climate, vehicle.id)
+            send_command("Stop Climate", vm.stop_climate, vehicle.id)
 
 # ── Windows ────────────────────────────────────────────────────────────────────
-with tabs[2]:
+elif tab == _TABS[2]:
     st.subheader("Window Control")
     if not vehicle.supports_window_control:
         st.warning("⚠️ Window control is not supported for this vehicle/region.")
@@ -176,24 +158,22 @@ with tabs[2]:
                                        format_func=lambda i: _state_labels[i], key=f"win_{key}")
                     window_selections[key] = _state_values[idx]
 
-            win_submitted = st.form_submit_button("🪟 Apply Window States", type="primary", width="stretch")
             wait_windows = st.checkbox("Wait for confirmation", value=True, key="wait_windows")
+            win_submitted = st.form_submit_button("🪟 Apply Window States", type="primary", width="stretch")
 
         if win_submitted:
-            def _ws(v):
-                return WINDOW_STATE(v)
             opts = WindowRequestOptions(
-                front_left=_ws(window_selections["fl"]),
-                front_right=_ws(window_selections["fr"]),
-                back_left=_ws(window_selections["rl"]),
-                back_right=_ws(window_selections["rr"]),
+                front_left=WINDOW_STATE(window_selections["fl"]),
+                front_right=WINDOW_STATE(window_selections["fr"]),
+                back_left=WINDOW_STATE(window_selections["rl"]),
+                back_right=WINDOW_STATE(window_selections["rr"]),
             )
-            aid = _send("Window Control", vm.set_windows_state, vehicle.id, opts)
+            aid = send_command("Window Control", vm.set_windows_state, vehicle.id, opts)
             if wait_windows and aid:
                 _poll_status(aid)
 
 # ── Alerts ─────────────────────────────────────────────────────────────────────
-with tabs[3]:
+elif tab == _TABS[3]:
     st.subheader("Lights & Horn Alerts")
     st.caption("Both commands activate for 30 seconds.")
     st.divider()
@@ -202,24 +182,28 @@ with tabs[3]:
         st.markdown("#### 🚨 Hazard Lights")
         st.caption("Flash hazard lights to locate your vehicle.")
         if st.button("🚨 Activate Hazard Lights", width="stretch", key="btn_hazard"):
-            _send("Hazard Lights", vm.start_hazard_lights, vehicle.id)
+            send_command("Hazard Lights", vm.start_hazard_lights, vehicle.id)
     with a_cols[1]:
         st.markdown("#### 📯 Hazard Lights + Horn")
         st.caption("Flash lights and honk horn simultaneously.")
         if st.button("📯 Lights + Horn", width="stretch", key="btn_horn"):
-            _send("Horn + Lights", vm.start_hazard_lights_and_horn, vehicle.id)
+            send_command("Horn + Lights", vm.start_hazard_lights_and_horn, vehicle.id)
 
 # ── Valet ──────────────────────────────────────────────────────────────────────
-with tabs[4]:
+elif tab == _TABS[4]:
     st.subheader("Valet Mode")
     st.caption("Valet mode restricts vehicle operation. Region-dependent feature.")
     st.divider()
     v_cols = st.columns(2)
     with v_cols[0]:
         st.markdown("#### Enable Valet Mode")
-        if st.button("🅿️ Start Valet Mode", width="stretch", key="btn_valet_on"):
-            _send("Start Valet Mode", vm.start_valet_mode, vehicle.id)
+        with st.popover("🅿️ Start Valet Mode", use_container_width=True):
+            st.warning("Enable valet mode? This restricts vehicle operation.")
+            if st.button("Yes, enable valet", type="primary", key="btn_valet_on_confirm"):
+                send_command("Start Valet Mode", vm.start_valet_mode, vehicle.id)
     with v_cols[1]:
         st.markdown("#### Disable Valet Mode")
-        if st.button("🔑 Stop Valet Mode", width="stretch", key="btn_valet_off"):
-            _send("Stop Valet Mode", vm.stop_valet_mode, vehicle.id)
+        with st.popover("🔑 Stop Valet Mode", use_container_width=True):
+            st.warning("Disable valet mode?")
+            if st.button("Yes, disable valet", type="primary", key="btn_valet_off_confirm"):
+                send_command("Stop Valet Mode", vm.stop_valet_mode, vehicle.id)

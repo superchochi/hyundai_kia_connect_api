@@ -3,23 +3,57 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import time
+from datetime import time as dt_time
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
-_UI = os.path.abspath(os.path.join(_HERE, ".."))
-for p in (_ROOT, _UI):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # ui-streamlit/
+from utils import _bootstrap  # noqa: F401  (adds repo root for hyundai_kia_connect_api)
 
 import streamlit as st
 
 from utils.session import render_sidebar, get_vm
-from utils.helpers import status_dot, fmt_val, fmt_distance
+from utils.commands import send_command
+from utils.helpers import status_dot, fmt_val, fmt_distance, door_status
 from hyundai_kia_connect_api import ScheduleChargingClimateRequestOptions
 from hyundai_kia_connect_api.const import ENGINE_TYPES
 
 DepartureOptions = ScheduleChargingClimateRequestOptions.DepartureOptions
+
+_DAYS_MAP = {0: "Sun", 1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat"}
+
+
+def _dep_form(
+    prefix: str,
+    enabled_default: bool,
+    time_default: dt_time,
+    days_default: list,
+    climate_default: bool,
+    temp_default: float,
+    defrost_default: bool,
+):
+    enabled = st.checkbox("Enable", value=enabled_default, key=f"{prefix}_enabled")
+    dep_cols = st.columns(2)
+    with dep_cols[0]:
+        dep_time = st.time_input("Departure Time", value=time_default, key=f"{prefix}_time")
+    with dep_cols[1]:
+        days = st.multiselect(
+            "Days",
+            options=list(_DAYS_MAP.keys()),
+            default=days_default,
+            format_func=lambda d: _DAYS_MAP[d],
+            key=f"{prefix}_days",
+        )
+    clim_enabled = st.checkbox("Enable Climate Pre-conditioning", value=climate_default, key=f"{prefix}_clim")
+    if clim_enabled:
+        c1, c2 = st.columns(2)
+        with c1:
+            temp = st.number_input("Temperature", 16.0, 30.0, temp_default, 0.5, key=f"{prefix}_temp")
+        with c2:
+            defrost = st.checkbox("Defrost", value=defrost_default, key=f"{prefix}_defrost")
+    else:
+        temp = temp_default
+        defrost = defrost_default
+    return enabled, dep_time, days, clim_enabled, temp, defrost
+
 
 st.set_page_config(page_title="Charging", page_icon="🔋", layout="wide")
 
@@ -36,16 +70,6 @@ if vehicle.engine_type not in (ENGINE_TYPES.EV, ENGINE_TYPES.PHEV):
 
 st.title("🔋 Charging")
 st.caption(f"{vehicle.name} · {vehicle.model}")
-
-
-def _send(label: str, fn, *args, **kwargs):
-    with st.spinner(f"Sending {label}…"):
-        try:
-            action_id = fn(*args, **kwargs)
-            st.success(f"✅ **{label}** sent. Action ID: `{action_id}`")
-        except Exception as e:
-            st.error(f"❌ **{label}** failed: {e}")
-
 
 # ── Current Status ─────────────────────────────────────────────────────────────
 st.subheader("⚡ Current Charging Status")
@@ -70,24 +94,28 @@ with s_cols[3]:
 
 st.divider()
 
-tabs = st.tabs(["▶️ Start / Stop", "🎚️ Charge Limits", "📅 Scheduled Departure", "🌙 Off-Peak Charging", "🔌 Charge Port", "⚡ V2L / V2X"])
+_TABS = ["▶️ Start / Stop", "🎚️ Charge Limits", "📅 Scheduled Departure", "🌙 Off-Peak Charging", "🔌 Charge Port", "⚡ V2L / V2X"]
+tab = st.segmented_control("Section", _TABS, default=_TABS[0], key="charging_tab", label_visibility="collapsed")
+if tab is None:
+    tab = _TABS[0]
+st.divider()
 
 # ── Start / Stop ───────────────────────────────────────────────────────────────
-with tabs[0]:
+if tab == _TABS[0]:
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("#### ▶️ Start Charging")
         st.caption("Initiates charging if charger is connected.")
         if st.button("▶️ Start Charge", width="stretch", type="primary", key="btn_start_charge"):
-            _send("Start Charge", vm.start_charge, vehicle.id)
+            send_command("Start Charge", vm.start_charge, vehicle.id)
     with col2:
         st.markdown("#### ⏹️ Stop Charging")
         st.caption("Stops an active charging session.")
         if st.button("⏹️ Stop Charge", width="stretch", key="btn_stop_charge"):
-            _send("Stop Charge", vm.stop_charge, vehicle.id)
+            send_command("Stop Charge", vm.stop_charge, vehicle.id)
 
 # ── Charge Limits ──────────────────────────────────────────────────────────────
-with tabs[1]:
+elif tab == _TABS[1]:
     st.markdown("#### Set Charge Limits")
     st.caption("Define maximum battery level for AC and DC charging.")
 
@@ -108,7 +136,7 @@ with tabs[1]:
         limits_submitted = st.form_submit_button("💾 Apply Charge Limits", type="primary", width="stretch")
 
     if limits_submitted:
-        _send("Set Charge Limits", vm.set_charge_limits, vehicle.id, ac_limit, dc_limit)
+        send_command("Set Charge Limits", vm.set_charge_limits, vehicle.id, ac_limit, dc_limit)
 
     st.divider()
     st.markdown("#### Set Charging Current (EU only)")
@@ -125,47 +153,19 @@ with tabs[1]:
         )
         cur_submitted = st.form_submit_button("💾 Apply Current Level", type="primary", width="stretch")
     if cur_submitted:
-        _send("Set Charging Current", vm.set_charging_current, vehicle.id, current_level)
+        send_command("Set Charging Current", vm.set_charging_current, vehicle.id, current_level)
 
 # ── Scheduled Departure ────────────────────────────────────────────────────────
-with tabs[2]:
+elif tab == _TABS[2]:
     st.markdown("#### Scheduled Departure / Preconditioning")
     st.caption("Configure up to two departure times with optional climate pre-conditioning.")
-
-    _days_map = {0: "Sun", 1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat"}
-
-    def _dep_form(prefix: str, enabled_default: bool, time_default: time,
-                  days_default: list, climate_default: bool, temp_default: float, defrost_default: bool):
-        enabled = st.checkbox("Enable", value=enabled_default, key=f"{prefix}_enabled")
-        dep_cols = st.columns(2)
-        with dep_cols[0]:
-            dep_time = st.time_input("Departure Time", value=time_default, key=f"{prefix}_time")
-        with dep_cols[1]:
-            days = st.multiselect(
-                "Days",
-                options=list(_days_map.keys()),
-                default=days_default,
-                format_func=lambda d: _days_map[d],
-                key=f"{prefix}_days",
-            )
-        clim_enabled = st.checkbox("Enable Climate Pre-conditioning", value=climate_default, key=f"{prefix}_clim")
-        if clim_enabled:
-            c1, c2 = st.columns(2)
-            with c1:
-                temp = st.number_input("Temperature", 16.0, 30.0, temp_default, 0.5, key=f"{prefix}_temp")
-            with c2:
-                defrost = st.checkbox("Defrost", value=defrost_default, key=f"{prefix}_defrost")
-        else:
-            temp = temp_default
-            defrost = defrost_default
-        return enabled, dep_time, days, clim_enabled, temp, defrost
 
     with st.form("schedule_form"):
         st.markdown("**First Departure**")
         f1_enabled, f1_time, f1_days, f1_clim, f1_temp, f1_defrost = _dep_form(
             "dep1",
             vehicle.ev_first_departure_enabled or False,
-            vehicle.ev_first_departure_time or time(7, 0),
+            vehicle.ev_first_departure_time or dt_time(7, 0),
             vehicle.ev_first_departure_days or [],
             vehicle.ev_first_departure_climate_enabled or False,
             vehicle.ev_first_departure_climate_temperature or 22.0,
@@ -176,7 +176,7 @@ with tabs[2]:
         f2_enabled, f2_time, f2_days, f2_clim, f2_temp, f2_defrost = _dep_form(
             "dep2",
             vehicle.ev_second_departure_enabled or False,
-            vehicle.ev_second_departure_time or time(8, 0),
+            vehicle.ev_second_departure_time or dt_time(8, 0),
             vehicle.ev_second_departure_days or [],
             vehicle.ev_second_departure_climate_enabled or False,
             vehicle.ev_second_departure_climate_temperature or 22.0,
@@ -206,19 +206,19 @@ with tabs[2]:
             temperature_unit=0,
             defrost=f1_defrost,
         )
-        _send("Schedule Charging & Climate", vm.schedule_charging_and_climate, vehicle.id, opts)
+        send_command("Schedule Charging & Climate", vm.schedule_charging_and_climate, vehicle.id, opts)
 
 # ── Off-Peak Charging ──────────────────────────────────────────────────────────
-with tabs[3]:
+elif tab == _TABS[3]:
     st.markdown("#### Off-Peak Charging Window")
     st.caption("Charge only during cheaper off-peak electricity hours.")
 
     with st.form("offpeak_form"):
         op_cols = st.columns(2)
         with op_cols[0]:
-            start_time = st.time_input("Off-Peak Start", value=vehicle.ev_off_peak_start_time or time(23, 0))
+            start_time = st.time_input("Off-Peak Start", value=vehicle.ev_off_peak_start_time or dt_time(23, 0))
         with op_cols[1]:
-            end_time = st.time_input("Off-Peak End", value=vehicle.ev_off_peak_end_time or time(7, 0))
+            end_time = st.time_input("Off-Peak End", value=vehicle.ev_off_peak_end_time or dt_time(7, 0))
         off_peak_only = st.checkbox(
             "Charge only during off-peak",
             value=vehicle.ev_off_peak_charge_only_enabled or False,
@@ -231,24 +231,23 @@ with tabs[3]:
             off_peak_end_time=end_time,
             off_peak_charge_only_enabled=off_peak_only,
         )
-        _send("Off-Peak Charging", vm.schedule_charging_and_climate, vehicle.id, opts)
+        send_command("Off-Peak Charging", vm.schedule_charging_and_climate, vehicle.id, opts)
 
 # ── Charge Port ────────────────────────────────────────────────────────────────
-with tabs[4]:
-    from utils.helpers import door_status
+elif tab == _TABS[4]:
     st.markdown("#### Charge Port Door")
     st.markdown(f"**Current state:** {door_status(vehicle.ev_charge_port_door_is_open)}")
     st.divider()
     cp_cols = st.columns(2)
     with cp_cols[0]:
         if st.button("🔓 Open Charge Port", width="stretch", key="btn_cp_open"):
-            _send("Open Charge Port", vm.open_charge_port, vehicle.id)
+            send_command("Open Charge Port", vm.open_charge_port, vehicle.id)
     with cp_cols[1]:
         if st.button("🔒 Close Charge Port", width="stretch", key="btn_cp_close"):
-            _send("Close Charge Port", vm.close_charge_port, vehicle.id)
+            send_command("Close Charge Port", vm.close_charge_port, vehicle.id)
 
 # ── V2L / V2X ──────────────────────────────────────────────────────────────────
-with tabs[5]:
+elif tab == _TABS[5]:
     st.markdown("#### Vehicle-to-Load (V2L) / Vehicle-to-Grid (V2X)")
     if vehicle.ev_v2l_status is None and vehicle.ev_v2l_discharge_limit is None:
         st.info("V2L/V2X data not available for this vehicle/region.")
@@ -268,4 +267,4 @@ with tabs[5]:
                                    vehicle.ev_v2l_discharge_limit or 20, step=5)
             v2l_submitted = st.form_submit_button("💾 Apply V2L Limit", type="primary", width="stretch")
         if v2l_submitted:
-            _send("Set V2L Limit", vm.set_vehicle_to_load_discharge_limit, vehicle.id, v2l_limit)
+            send_command("Set V2L Limit", vm.set_vehicle_to_load_discharge_limit, vehicle.id, v2l_limit)

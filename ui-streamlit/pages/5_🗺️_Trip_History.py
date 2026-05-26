@@ -5,19 +5,15 @@ import os
 import sys
 from datetime import datetime, date, timedelta, timezone
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
-_UI = os.path.abspath(os.path.join(_HERE, ".."))
-for p in (_ROOT, _UI):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # ui-streamlit/
+from utils import _bootstrap  # noqa: F401  (adds repo root for hyundai_kia_connect_api)
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
 from utils.session import render_sidebar, get_vm
-from utils.helpers import fmt_duration, fmt_speed, fmt_distance
+from utils.helpers import fmt_duration, fmt_speed, fmt_distance, chart_layout
 
 st.set_page_config(page_title="Trip History", page_icon="🗺️", layout="wide")
 
@@ -113,8 +109,7 @@ if mti.day_list:
     ])
     fig = px.bar(df_days, x="Date", y="Trips", title="Daily Trip Count",
                  color="Trips", color_continuous_scale="Blues")
-    fig.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                      font_color="#e0e0e0", xaxis_tickangle=-45, showlegend=False)
+    fig.update_layout(**chart_layout(xaxis_tickangle=-45, showlegend=False))
     st.plotly_chart(fig, width="stretch")
 
 st.divider()
@@ -224,6 +219,5 @@ if len(dti.trip_list) > 1:
                   color="Distance", color_continuous_scale="Blues",
                   labels={"Distance": f"Distance ({vehicle.odometer_unit or 'km'})",
                           "Trip": "Trip (start – end)"})
-    fig2.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                       font_color="#e0e0e0", showlegend=False)
+    fig2.update_layout(**chart_layout(showlegend=False))
     st.plotly_chart(fig2, width="stretch")

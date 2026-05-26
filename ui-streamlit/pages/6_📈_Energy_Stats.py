@@ -4,12 +4,8 @@ from __future__ import annotations
 import os
 import sys
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
-_UI = os.path.abspath(os.path.join(_HERE, ".."))
-for p in (_ROOT, _UI):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # ui-streamlit/
+from utils import _bootstrap  # noqa: F401  (adds repo root for hyundai_kia_connect_api)
 
 import pandas as pd
 import plotly.express as px
@@ -17,7 +13,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from utils.session import render_sidebar
-from utils.helpers import fmt_energy, fmt_distance
+from utils.helpers import fmt_energy, fmt_distance, chart_layout
 
 st.set_page_config(page_title="Energy Stats", page_icon="📈", layout="wide")
 
@@ -111,10 +107,7 @@ fig_dist = px.bar(
     color_continuous_scale="Blues",
     labels={"Distance": f"Distance ({vehicle.odometer_unit or 'km'})"},
 )
-fig_dist.update_layout(
-    plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-    font_color="#e0e0e0", showlegend=False,
-)
+fig_dist.update_layout(**chart_layout(showlegend=False))
 st.plotly_chart(fig_dist, width="stretch")
 
 # Chart 2: Stacked energy breakdown
@@ -136,14 +129,12 @@ fig_energy.add_trace(go.Scatter(
     marker=dict(size=6),
 ))
 
-fig_energy.update_layout(
+fig_energy.update_layout(**chart_layout(
     title="Daily Energy Breakdown",
     barmode="stack",
-    plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-    font_color="#e0e0e0",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     yaxis_title="Energy (Wh)",
-)
+))
 st.plotly_chart(fig_energy, width="stretch")
 
 # Chart 3: Efficiency (Wh/km)
@@ -159,10 +150,7 @@ if not df_eff.empty:
         markers=True,
         color_discrete_sequence=["#00b4d8"],
     )
-    fig_eff.update_layout(
-        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-        font_color="#e0e0e0", yaxis_title="Wh/km",
-    )
+    fig_eff.update_layout(**chart_layout(yaxis_title="Wh/km"))
     st.plotly_chart(fig_eff, width="stretch")
 
 st.divider()

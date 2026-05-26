@@ -13,6 +13,8 @@ _ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+from utils.helpers import lock_status, fmt_time_ago, fmt_val
+
 
 def get_vm():
     return st.session_state.get("vm")
@@ -73,7 +75,6 @@ def render_sidebar():
     st.sidebar.divider()
 
     # Mini status summary
-    from utils.helpers import lock_status, fmt_time_ago, fmt_val
     st.sidebar.markdown(f"**Status:** {lock_status(selected.is_locked)}")
     if selected.ev_battery_percentage is not None:
         pct = selected.ev_battery_percentage

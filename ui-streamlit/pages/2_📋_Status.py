@@ -4,19 +4,15 @@ from __future__ import annotations
 import os
 import sys
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
-_UI = os.path.abspath(os.path.join(_HERE, ".."))
-for p in (_ROOT, _UI):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # ui-streamlit/
+from utils import _bootstrap  # noqa: F401  (adds repo root for hyundai_kia_connect_api)
 
 import streamlit as st
 
 from utils.session import render_sidebar
 from utils.helpers import (
     fmt_val, fmt_bool, status_dot, warning_dot,
-    door_status, door_lock_status, fmt_distance, fmt_energy,
+    door_status, door_lock_status, lock_status, fmt_distance, fmt_energy,
 )
 from hyundai_kia_connect_api.const import SEAT_STATUS, HEAT_STATUS
 
@@ -57,7 +53,6 @@ with tabs[0]:
         st.markdown(door_status(vehicle.hood_is_open))
     with extra_cols[2]:
         st.markdown("**Overall Lock**")
-        from utils.helpers import lock_status
         st.markdown(lock_status(vehicle.is_locked))
 
     st.divider()

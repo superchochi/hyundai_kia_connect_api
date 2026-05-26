@@ -4,20 +4,18 @@ from __future__ import annotations
 import os
 import sys
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
-_UI = os.path.abspath(os.path.join(_HERE, ".."))
-for p in (_ROOT, _UI):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # ui-streamlit/
+from utils import _bootstrap  # noqa: F401  (adds repo root for hyundai_kia_connect_api)
 
 import streamlit as st
 
 from utils.session import render_sidebar, get_vm
+from utils.commands import send_command
 from utils.helpers import (
     fmt_val, fmt_distance, fmt_time_ago, fmt_datetime,
     lock_status, status_dot, engine_type_badge,
 )
+from hyundai_kia_connect_api import ClimateRequestOptions
 from hyundai_kia_connect_api.const import ENGINE_TYPES
 
 st.set_page_config(page_title="Dashboard", page_icon="🚗", layout="wide")
@@ -41,7 +39,6 @@ with cols[0]:
 
 with cols[1]:
     if vehicle.ev_battery_percentage is not None:
-        delta = None
         st.metric("EV Battery", f"{vehicle.ev_battery_percentage}%")
         st.progress(vehicle.ev_battery_percentage / 100)
     elif vehicle.fuel_level is not None:
@@ -96,7 +93,7 @@ st.divider()
 lat = vehicle.location_latitude
 lon = vehicle.location_longitude
 
-if lat and lon:
+if lat is not None and lon is not None:
     st.subheader("📍 Location")
     try:
         import folium
@@ -129,35 +126,28 @@ st.divider()
 # ── Quick actions ──────────────────────────────────────────────────────────────
 st.subheader("⚡ Quick Actions")
 
-def _run_action(label, fn, *args, **kwargs):
-    with st.spinner(f"{label}…"):
-        try:
-            action_id = fn(*args, **kwargs)
-            st.toast(f"✅ {label} command sent (ID: {action_id})", icon="✅")
-        except Exception as e:
-            st.error(f"{label} failed: {e}")
-
 qa_cols = st.columns(6)
 with qa_cols[0]:
     if st.button("🔒 Lock", width="stretch"):
-        _run_action("Lock", vm.lock, vehicle.id)
+        send_command("Lock", vm.lock, vehicle.id, toast=True)
 with qa_cols[1]:
-    if st.button("🔓 Unlock", width="stretch"):
-        _run_action("Unlock", vm.unlock, vehicle.id)
+    with st.popover("🔓 Unlock", use_container_width=True):
+        st.caption("Unlock all doors?")
+        if st.button("Yes, unlock", type="primary", key="qa_unlock_confirm"):
+            send_command("Unlock", vm.unlock, vehicle.id, toast=True)
 with qa_cols[2]:
     if st.button("❄️ Climate On", width="stretch"):
-        from hyundai_kia_connect_api import ClimateRequestOptions
         opts = ClimateRequestOptions(set_temp=22.0, duration=10, defrost=False, climate=True, heating=0)
-        _run_action("Climate On", vm.start_climate, vehicle.id, opts)
+        send_command("Climate On", vm.start_climate, vehicle.id, opts, toast=True)
 with qa_cols[3]:
     if st.button("🌡️ Climate Off", width="stretch"):
-        _run_action("Climate Off", vm.stop_climate, vehicle.id)
+        send_command("Climate Off", vm.stop_climate, vehicle.id, toast=True)
 with qa_cols[4]:
     if st.button("🚨 Hazard Lights", width="stretch"):
-        _run_action("Hazard Lights", vm.start_hazard_lights, vehicle.id)
+        send_command("Hazard Lights", vm.start_hazard_lights, vehicle.id, toast=True)
 with qa_cols[5]:
     if st.button("🔔 Horn + Lights", width="stretch"):
-        _run_action("Horn + Lights", vm.start_hazard_lights_and_horn, vehicle.id)
+        send_command("Horn + Lights", vm.start_hazard_lights_and_horn, vehicle.id, toast=True)
 
 # ── Vehicle info ───────────────────────────────────────────────────────────────
 with st.expander("ℹ️ Vehicle Details"):
@@ -187,7 +177,7 @@ with st.expander("ℹ️ Vehicle Details"):
                     st.session_state["vehicles"] = list(vm.vehicles.values())
                     st.rerun()
                 except Exception as e:
-                    st.error(str(e))
+                    st.error(f"❌ Failed to enable vehicle: {e}")
     with tog_cols[1]:
         if st.button("🚫 Disable Vehicle", disabled=not enabled, width="stretch", key="btn_disable_vehicle"):
             with st.spinner("Disabling…"):
@@ -196,4 +186,4 @@ with st.expander("ℹ️ Vehicle Details"):
                     st.session_state["vehicles"] = list(vm.vehicles.values())
                     st.rerun()
                 except Exception as e:
-                    st.error(str(e))
+                    st.error(f"❌ Failed to disable vehicle: {e}")
