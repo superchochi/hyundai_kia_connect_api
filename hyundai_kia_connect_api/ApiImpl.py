@@ -1,6 +1,6 @@
 """ApiImpl.py"""
 
-# pylint:disable=unnecessary-pass,missing-class-docstring,invalid-name,missing-function-docstring,wildcard-import,unused-wildcard-import,unused-argument,missing-timeout,logging-fstring-interpolation
+# pylint:disable=unnecessary-pass,missing-class-docstring,invalid-name,missing-function-docstring,wildcard-import,unused-wildcard-import,unused-argument,logging-fstring-interpolation
 import datetime as dt
 import logging
 from dataclasses import dataclass
@@ -13,7 +13,7 @@ try:
 except ImportError:
     GoogleV3 = None
 
-from .utils import get_child_value
+from .utils import get_child_value, to_int_enum
 from .Token import Token
 from .Vehicle import Vehicle
 from .const import (
@@ -52,6 +52,13 @@ class WindowRequestOptions:
     back_right: WINDOW_STATE = None
     front_left: WINDOW_STATE = None
     front_right: WINDOW_STATE = None
+
+    def __post_init__(self):
+        """Convert string/int values to WINDOW_STATE enums."""
+        self.back_left = to_int_enum(WINDOW_STATE, self.back_left)
+        self.back_right = to_int_enum(WINDOW_STATE, self.back_right)
+        self.front_left = to_int_enum(WINDOW_STATE, self.front_left)
+        self.front_right = to_int_enum(WINDOW_STATE, self.front_right)
 
 
 @dataclass
@@ -123,12 +130,40 @@ class POIInfo:
         }
 
 
+class ApiImplSession(requests.Session):
+    """Shared HTTP session with default timeout and connection pooling.
+
+    All regions should use this session (or a subclass) for HTTP calls.
+    Override class attributes per region in __init__ if needed.
+
+    Retry is intentionally NOT configured here. Pre-PR behavior retried only
+    CA connection errors (#857, login error 104), and not all requests are
+    safe to replay (e.g. non-idempotent control POSTs). If connection-reset
+    issues reappear, re-add a login-only connection retry. See PR #1160.
+    """
+
+    HTTP_CONNECT_TIMEOUT = 10
+    HTTP_READ_TIMEOUT = 30
+
+    def request(self, method, url, **kwargs):
+        kwargs.setdefault(
+            "timeout", (self.HTTP_CONNECT_TIMEOUT, self.HTTP_READ_TIMEOUT)
+        )
+        try:
+            return super().request(method, url, **kwargs)
+        except requests.exceptions.Timeout as exc:
+            from .exceptions import RequestTimeoutError
+
+            raise RequestTimeoutError(str(exc)) from exc
+
+
 class ApiImpl:
     data_timezone = dt.timezone.utc
     temperature_range = None
     previous_latitude: float = None
     previous_longitude: float = None
     supports_window_control: bool = False
+    supports_valet_mode: bool = False
 
     def __init__(self) -> None:
         """Initialize."""
@@ -224,7 +259,7 @@ class ApiImpl:
                     + email_parameter
                 )
                 headers = {"user-agent": "curl/7.81.0"}
-                response = requests.get(url, headers=headers)
+                response = requests.get(url, headers=headers, timeout=(5, 15))
                 try:
                     response = response.json()
                 except JSONDecodeError:

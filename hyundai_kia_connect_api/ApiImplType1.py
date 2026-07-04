@@ -1,16 +1,17 @@
 """ApiImplType1.py"""
 
 import datetime as dt
-import requests
+import functools
 import logging
 import math
-from typing import Optional
-from datetime import timedelta, timezone
+import threading
 
+import time
 from time import sleep
 
 from .ApiImpl import (
     ApiImpl,
+    ApiImplSession,
     ScheduleChargingClimateRequestOptions,
     ClimateRequestOptions,
     WindowRequestOptions,
@@ -19,7 +20,12 @@ from .ApiImpl import (
 from .Token import Token
 from .Vehicle import Vehicle
 
-from .utils import get_child_value, parse_datetime, get_index_into_hex_temp
+from .utils import (
+    get_child_value,
+    parse_datetime,
+    get_index_into_hex_temp,
+    window_is_open,
+)
 
 from .const import (
     DOMAIN,
@@ -47,6 +53,29 @@ from .exceptions import (
 USER_AGENT_OK_HTTP: str = "okhttp/3.12.0"
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _retry_on_device_id_error(func):
+    """On DeviceIDError, re-register device_id and retry once.
+
+    EU server invalidates device_id when push delivery fails. Instead of
+    proactively rotating device_id after every control command (which causes
+    race conditions), we retry only when the error actually occurs.
+    """
+    _device_id_lock = threading.Lock()
+
+    @functools.wraps(func)
+    def wrapper(self, token, *args, **kwargs):
+        try:
+            return func(self, token, *args, **kwargs)
+        except DeviceIDError:
+            with _device_id_lock:
+                _LOGGER.debug(f"{DOMAIN} - DeviceIDError, re-registering device_id")
+                stamp = self._get_stamp()
+                token.device_id = self._get_device_id(stamp)
+            return func(self, token, *args, **kwargs)
+
+    return wrapper
 
 
 def _check_response_for_errors(response: dict) -> None:
@@ -116,9 +145,11 @@ class ApiImplType1(ApiImpl):
     """ApiImplType1"""
 
     supports_window_control: bool = True
+    supports_valet_mode: bool = True
 
     def __init__(self) -> None:
         """Initialize."""
+        self.session = ApiImplSession()
 
     def _sanitize_ice_value(self, state: dict) -> None:
         """
@@ -163,9 +194,10 @@ class ApiImplType1(ApiImpl):
             # This is defensive programming in case the API structure changes
             pass
 
+    @_retry_on_device_id_error
     def get_vehicles(self, token: Token) -> list[Vehicle]:
         url = self.SPA_API_URL + "vehicles"
-        response = requests.get(
+        response = self.session.get(
             url,
             headers=self._get_authenticated_headers(token),
         ).json()
@@ -212,7 +244,7 @@ class ApiImplType1(ApiImpl):
         return value
 
     def _get_authenticated_headers(
-        self, token: Token, ccs2_support: Optional[int] = None
+        self, token: Token, ccs2_support: int | None = None
     ) -> dict:
         return {
             "Authorization": token.access_token,
@@ -238,15 +270,14 @@ class ApiImplType1(ApiImpl):
         }
 
     def _update_vehicle_properties_ccs2(self, vehicle: Vehicle, state: dict) -> None:
-        if get_child_value(state, "Offset"):
-            offset = float(get_child_value(state, "Offset"))
-            hours = int(offset)
-            minutes = int((offset - hours) * 60)
-            vehicle.timezone = timezone(timedelta(hours=hours, minutes=minutes))
         if get_child_value(state, "Date"):
+            # CCS2 'Date' is always in UTC, convert to the region timezone.
+            # Always use a named timezone to ensure DST adjustment.
+            # In EU, CCS2 'Offset' is always 1 (CET), but CEST is UTC+0100.
+            # In AU, CCS2 'Offset' is 10 (AEST), but AEDT is UTC+1100.
             vehicle.last_updated_at = parse_datetime(
-                get_child_value(state, "Date"), vehicle.timezone
-            )
+                get_child_value(state, "Date"), dt.timezone.utc
+            ).astimezone(self.data_timezone)
         else:
             vehicle.last_updated_at = dt.datetime.now(self.data_timezone)
 
@@ -264,15 +295,19 @@ class ApiImplType1(ApiImpl):
             state,
             "Cabin.HVAC.Row1.Driver.Temperature.Value",
         )
+        unit = get_child_value(
+            state,
+            "Cabin.HVAC.Row1.Driver.Temperature.Unit",
+        )
 
-        if air_temp is not None and air_temp != "OFF":
-            vehicle.air_temperature = (float(air_temp), TEMPERATURE_UNITS[1])
+        if air_temp not in (None, "OFF") and unit in TEMPERATURE_UNITS:
+            vehicle.air_temperature = (air_temp, TEMPERATURE_UNITS[unit])
 
         outside_temp = get_child_value(state, "Cabin.HVAC.OutsideTemperature.Value")
         outside_temp_unit = get_child_value(state, "Cabin.HVAC.OutsideTemperature.Unit")
         if outside_temp is not None and outside_temp_unit is not None:
             vehicle.outside_temperature = (
-                float(outside_temp),
+                outside_temp,
                 TEMPERATURE_UNITS[outside_temp_unit],
             )
 
@@ -296,21 +331,55 @@ class ApiImplType1(ApiImpl):
 
         # TODO: status.sideMirrorHeat
 
-        vehicle.front_left_seat_status = SEAT_STATUS[
+        vehicle.front_left_seat_status = SEAT_STATUS.get(
             get_child_value(state, "Cabin.Seat.Row1.Driver.Climate.State")
-        ]
+        )
 
-        vehicle.front_right_seat_status = SEAT_STATUS[
+        vehicle.front_right_seat_status = SEAT_STATUS.get(
             get_child_value(state, "Cabin.Seat.Row1.Passenger.Climate.State")
-        ]
+        )
 
-        vehicle.rear_left_seat_status = SEAT_STATUS[
+        vehicle.rear_left_seat_status = SEAT_STATUS.get(
             get_child_value(state, "Cabin.Seat.Row2.Left.Climate.State")
-        ]
+        )
 
-        vehicle.rear_right_seat_status = SEAT_STATUS[
+        vehicle.rear_right_seat_status = SEAT_STATUS.get(
             get_child_value(state, "Cabin.Seat.Row2.Right.Climate.State")
-        ]
+        )
+
+        vehicle.headlamp_status = get_child_value(
+            state, "Body.Lights.Front.HeadLamp.SystemWarning"
+        )
+        vehicle.headlamp_left_low = get_child_value(
+            state, "Body.Lights.Front.Left.Low.Warning"
+        )
+        vehicle.headlamp_right_low = get_child_value(
+            state, "Body.Lights.Front.Right.Low.Warning"
+        )
+        vehicle.headlamp_left_high = get_child_value(
+            state, "Body.Lights.Front.Left.High.Warning"
+        )
+        vehicle.headlamp_right_high = get_child_value(
+            state, "Body.Lights.Front.Right.High.Warning"
+        )
+        vehicle.stop_lamp_left = get_child_value(
+            state, "Body.Lights.Rear.Left.StopLamp.Warning"
+        )
+        vehicle.stop_lamp_right = get_child_value(
+            state, "Body.Lights.Rear.Right.StopLamp.Warning"
+        )
+        vehicle.turn_signal_left_front = get_child_value(
+            state, "Body.Lights.Front.Left.TurnSignal.Warning"
+        )
+        vehicle.turn_signal_right_front = get_child_value(
+            state, "Body.Lights.Front.Right.TurnSignal.Warning"
+        )
+        vehicle.turn_signal_left_rear = get_child_value(
+            state, "Body.Lights.Rear.Left.TurnSignal.Warning"
+        )
+        vehicle.turn_signal_right_rear = get_child_value(
+            state, "Body.Lights.Rear.Right.TurnSignal.Warning"
+        )
 
         vehicle.front_left_door_is_open = get_child_value(
             state, "Cabin.Door.Row1.Driver.Open"
@@ -354,17 +423,25 @@ class ApiImplType1(ApiImpl):
         )
 
         vehicle.hood_is_open = get_child_value(state, "Body.Hood.Open")
-        vehicle.front_left_window_is_open = get_child_value(
-            state, "Cabin.Window.Row1.Driver.Open"
+        vehicle.front_left_window_is_open = window_is_open(
+            state,
+            "Cabin.Window.Row1.Driver.Open",
+            "Cabin.Window.Row1.Driver.OpenLevel",
         )
-        vehicle.front_right_window_is_open = get_child_value(
-            state, "Cabin.Window.Row1.Passenger.Open"
+        vehicle.front_right_window_is_open = window_is_open(
+            state,
+            "Cabin.Window.Row1.Passenger.Open",
+            "Cabin.Window.Row1.Passenger.OpenLevel",
         )
-        vehicle.back_left_window_is_open = get_child_value(
-            state, "Cabin.Window.Row2.Left.Open"
+        vehicle.back_left_window_is_open = window_is_open(
+            state,
+            "Cabin.Window.Row2.Left.Open",
+            "Cabin.Window.Row2.Left.OpenLevel",
         )
-        vehicle.back_right_window_is_open = get_child_value(
-            state, "Cabin.Window.Row2.Right.Open"
+        vehicle.back_right_window_is_open = window_is_open(
+            state,
+            "Cabin.Window.Row2.Right.Open",
+            "Cabin.Window.Row2.Right.OpenLevel",
         )
         vehicle.sunroof_is_open = (
             bool(get_child_value(state, "Body.Sunroof.Glass.Open"))
@@ -425,6 +502,7 @@ class ApiImplType1(ApiImpl):
         )
         if battery_winter_mode is not None:
             vehicle.ev_battery_winter_mode = bool(battery_winter_mode)
+            vehicle.ev_battery_precondition_enabled = bool(battery_winter_mode)
 
         if get_child_value(state, "Green.Electric.SmartGrid.RealTimePower") is not None:
             vehicle.ev_charging_power = get_child_value(
@@ -608,6 +686,7 @@ class ApiImplType1(ApiImpl):
 
         vehicle.data = state
 
+    @_retry_on_device_id_error
     def start_charge(self, token: Token, vehicle: Vehicle) -> str:
         if not vehicle.ccu_ccs2_protocol_support:
             url = self.SPA_API_URL + "vehicles/" + vehicle.id + "/control/charge"
@@ -626,12 +705,12 @@ class ApiImplType1(ApiImpl):
             headers = self._get_control_headers(token, vehicle)
 
         _LOGGER.debug(f"{DOMAIN} - Start Charge Action Request: {payload}")
-        response = requests.post(url, json=payload, headers=headers).json()
+        response = self.session.post(url, json=payload, headers=headers).json()
         _LOGGER.debug(f"{DOMAIN} - Start Charge Action Response: {response}")
         _check_response_for_errors(response)
-        token.device_id = self._get_device_id(self._get_stamp())
         return response["msgId"]
 
+    @_retry_on_device_id_error
     def stop_charge(self, token: Token, vehicle: Vehicle) -> str:
         if not vehicle.ccu_ccs2_protocol_support:
             url = self.SPA_API_URL + "vehicles/" + vehicle.id + "/control/charge"
@@ -650,19 +729,23 @@ class ApiImplType1(ApiImpl):
             headers = self._get_control_headers(token, vehicle)
 
         _LOGGER.debug(f"{DOMAIN} - Stop Charge Action Request: {payload}")
-        response = requests.post(url, json=payload, headers=headers).json()
+        response = self.session.post(url, json=payload, headers=headers).json()
         _LOGGER.debug(f"{DOMAIN} - Stop Charge Action Response: {response}")
         _check_response_for_errors(response)
-        token.device_id = self._get_device_id(self._get_stamp())
         return response["msgId"]
 
+    @_retry_on_device_id_error
     def set_charging_current(self, token: Token, vehicle: Vehicle, level: int) -> str:
+        if not vehicle.ccu_ccs2_protocol_support:
+            raise UnsupportedControlError(
+                "set_charging_current requires CCS2 protocol support"
+            )
         url = (
             self.SPA_API_URL + "vehicles/" + vehicle.id + "/ccs2/charge/chargingcurrent"
         )
 
         body = {"chargingCurrent": level}
-        response = requests.post(
+        response = self.session.post(
             url,
             json=body,
             headers=self._get_authenticated_headers(
@@ -671,9 +754,9 @@ class ApiImplType1(ApiImpl):
         ).json()
         _LOGGER.debug(f"{DOMAIN} - Set Charging Current Response: {response}")
         _check_response_for_errors(response)
-        token.device_id = self._get_device_id(self._get_stamp())
         return response["msgId"]
 
+    @_retry_on_device_id_error
     def set_charge_limits(
         self, token: Token, vehicle: Vehicle, ac: int, dc: int
     ) -> str:
@@ -692,7 +775,7 @@ class ApiImplType1(ApiImpl):
             ]
         }
         _LOGGER.debug(f"{DOMAIN} - Set Charge Limits Body: {body}")
-        response = requests.post(
+        response = self.session.post(
             url,
             json=body,
             headers=self._get_authenticated_headers(
@@ -701,9 +784,9 @@ class ApiImplType1(ApiImpl):
         ).json()
         _LOGGER.debug(f"{DOMAIN} - Set Charge Limits Response: {response}")
         _check_response_for_errors(response)
-        token.device_id = self._get_device_id(self._get_stamp())
         return response["msgId"]
 
+    @_retry_on_device_id_error
     def set_vehicle_to_load_discharge_limit(
         self, token: Token, vehicle: Vehicle, limit: int
     ) -> str:
@@ -712,7 +795,7 @@ class ApiImplType1(ApiImpl):
         )
 
         body = {"dischargingLimit": int(limit)}
-        response = requests.post(
+        response = self.session.post(
             url,
             json=body,
             headers=self._get_authenticated_headers(
@@ -721,9 +804,9 @@ class ApiImplType1(ApiImpl):
         ).json()
         _LOGGER.debug(f"{DOMAIN} - Set v2l limit Response: {response}")
         _check_response_for_errors(response)
-        token.device_id = self._get_device_id(self._get_stamp())
         return response["msgId"]
 
+    @_retry_on_device_id_error
     def lock_action(
         self, token: Token, vehicle: Vehicle, action: VEHICLE_LOCK_ACTION
     ) -> str:
@@ -743,10 +826,9 @@ class ApiImplType1(ApiImpl):
 
         _LOGGER.debug(f"{DOMAIN} - Lock Action Request: {payload}")
 
-        response = requests.post(url, json=payload, headers=headers).json()
+        response = self.session.post(url, json=payload, headers=headers).json()
         _LOGGER.debug(f"{DOMAIN} - Lock Action Response: {response}")
         _check_response_for_errors(response)
-        token.device_id = self._get_device_id(self._get_stamp())
         return response["msgId"]
 
     def check_action_status(
@@ -781,7 +863,7 @@ class ApiImplType1(ApiImpl):
             return ORDER_STATUS.TIMEOUT
 
         else:
-            response = requests.get(
+            response = self.session.get(
                 url,
                 headers=self._get_authenticated_headers(
                     token, vehicle.ccu_ccs2_protocol_support
@@ -809,6 +891,7 @@ class ApiImplType1(ApiImpl):
             # Old code: raise APIError(f"No action found with ID {action_id}")
             return ORDER_STATUS.UNKNOWN
 
+    @_retry_on_device_id_error
     def schedule_charging_and_climate(
         self,
         token: Token,
@@ -915,14 +998,33 @@ class ApiImplType1(ApiImpl):
         }
 
         _LOGGER.debug(f"{DOMAIN} - Schedule Charging and Climate Request: {payload}")
-        response = requests.post(
+        response = self.session.post(
             url, json=payload, headers=self._get_control_headers(token, vehicle)
         ).json()
         _LOGGER.debug(f"{DOMAIN} - Schedule Charging and Climate Response: {response}")
         _check_response_for_errors(response)
-        token.device_id = self._get_device_id(self._get_stamp())
         return response["msgId"]
 
+    def _get_drv_seat_loc(self, vehicle: Vehicle) -> str:
+        """Return the driver seat location for CCS2 climate payloads.
+
+        "L" for LHD (left-hand drive), "R" for RHD (right-hand drive).
+        Derived from the vehicle's reported odometer unit: mile-based markets
+        (UK, Ireland) are RHD, kilometre-based markets are LHD.
+
+        This base implementation covers EU and CN. RHD regions that use
+        kilometres (AU, IN) override this method to return "R" directly,
+        because the km/miles signal would incorrectly resolve to "L".
+
+        Falls back to "L" when the odometer unit is unavailable (e.g. the
+        cached state response did not include it), which is correct for the
+        LHD majority of EU/CN markets.
+        """
+        if vehicle.odometer_unit in (DISTANCE_UNITS[2], DISTANCE_UNITS[3]):
+            return "R"
+        return "L"
+
+    @_retry_on_device_id_error
     def start_climate(
         self, token: Token, vehicle: Vehicle, options: ClimateRequestOptions
     ) -> str:
@@ -957,7 +1059,7 @@ class ApiImplType1(ApiImpl):
                 "unit": "C",
             }
             _LOGGER.debug(f"{DOMAIN} - Start Climate Action Request: {payload}")
-            response = requests.post(
+            response = self.session.post(
                 url,
                 json=payload,
                 headers=self._get_authenticated_headers(
@@ -978,7 +1080,7 @@ class ApiImplType1(ApiImpl):
                 "hvacTempType": 1,
                 "hvacTemp": options.set_temp,
                 "sideRearMirrorHeating": 1,
-                "drvSeatLoc": "R",
+                "drvSeatLoc": self._get_drv_seat_loc(vehicle),
                 "seatClimateInfo": {
                     "drvSeatClimateState": options.front_left_seat,
                     "psgSeatClimateState": options.front_right_seat,
@@ -989,16 +1091,16 @@ class ApiImplType1(ApiImpl):
                 "windshieldFrontDefogState": options.defrost,
             }
             _LOGGER.debug(f"{DOMAIN} - Start Climate Action Request: {payload}")
-            response = requests.post(
+            response = self.session.post(
                 url,
                 json=payload,
                 headers=self._get_control_headers(token, vehicle),
             ).json()
         _LOGGER.debug(f"{DOMAIN} - Start Climate Action Response: {response}")
         _check_response_for_errors(response)
-        token.device_id = self._get_device_id(self._get_stamp())
         return response["msgId"]
 
+    @_retry_on_device_id_error
     def stop_climate(self, token: Token, vehicle: Vehicle) -> str:
         if not vehicle.ccu_ccs2_protocol_support:
             url = self.SPA_API_URL + "vehicles/" + vehicle.id + "/control/temperature"
@@ -1013,7 +1115,7 @@ class ApiImplType1(ApiImpl):
                 "unit": "C",
             }
             _LOGGER.debug(f"{DOMAIN} - Stop Climate Action Request: {payload}")
-            response = requests.post(
+            response = self.session.post(
                 url,
                 json=payload,
                 headers=self._get_authenticated_headers(
@@ -1031,46 +1133,46 @@ class ApiImplType1(ApiImpl):
                 "command": "stop",
             }
             _LOGGER.debug(f"{DOMAIN} - Stop Climate Action Request: {payload}")
-            response = requests.post(
+            response = self.session.post(
                 url,
                 json=payload,
                 headers=self._get_control_headers(token, vehicle),
             ).json()
         _LOGGER.debug(f"{DOMAIN} - Stop Climate Action Response: {response}")
         _check_response_for_errors(response)
-        token.device_id = self._get_device_id(self._get_stamp())
         return response["msgId"]
 
+    @_retry_on_device_id_error
     def start_hazard_lights(self, token: Token, vehicle: Vehicle) -> str:
         url = self.SPA_API_URL_V2 + "vehicles/" + vehicle.id + "/ccs2/control/light"
 
         payload = {"command": "on"}
         _LOGGER.debug(f"{DOMAIN} - Start Hazard Lights Request: {payload}")
-        response = requests.post(
+        response = self.session.post(
             url,
             json=payload,
             headers=self._get_control_headers(token, vehicle),
         ).json()
         _LOGGER.debug(f"{DOMAIN} - Start Hazard Lights Response: {response}")
         _check_response_for_errors(response)
-        token.device_id = self._get_device_id(self._get_stamp())
         return response["msgId"]
 
+    @_retry_on_device_id_error
     def start_hazard_lights_and_horn(self, token: Token, vehicle: Vehicle) -> str:
         url = self.SPA_API_URL_V2 + "vehicles/" + vehicle.id + "/ccs2/control/hornlight"
 
         payload = {"command": "on"}
         _LOGGER.debug(f"{DOMAIN} - Start Hazard Lights and Horn Request: {payload}")
-        response = requests.post(
+        response = self.session.post(
             url,
             json=payload,
             headers=self._get_control_headers(token, vehicle),
         ).json()
         _LOGGER.debug(f"{DOMAIN} - Start Hazard Lights and Horn Response: {response}")
         _check_response_for_errors(response)
-        token.device_id = self._get_device_id(self._get_stamp())
         return response["msgId"]
 
+    @_retry_on_device_id_error
     def set_windows_state(
         self, token: Token, vehicle: Vehicle, options: WindowRequestOptions
     ) -> str:
@@ -1083,14 +1185,14 @@ class ApiImplType1(ApiImpl):
             "frontRight": options.front_right,
         }
         _LOGGER.debug(f"{DOMAIN} - Window State Action Request: {payload}")
-        response = requests.post(
+        response = self.session.post(
             url, json=payload, headers=self._get_control_headers(token, vehicle)
         ).json()
         _LOGGER.debug(f"{DOMAIN} - Window State Action Response: {response}")
         _check_response_for_errors(response)
-        token.device_id = self._get_device_id(self._get_stamp())
         return response["msgId"]
 
+    @_retry_on_device_id_error
     def set_navigation(
         self, token: Token, vehicle: Vehicle, poi_list: list[POIInfo]
     ) -> str:
@@ -1100,15 +1202,89 @@ class ApiImplType1(ApiImpl):
             "poiInfoList": [poi.to_dict() for poi in poi_list],
         }
         _LOGGER.debug(f"{DOMAIN} - Set Navigation Request: {payload}")
-        response = requests.post(
+        response = self.session.post(
             url, json=payload, headers=self._get_control_headers(token, vehicle)
         ).json()
         _LOGGER.debug(f"{DOMAIN} - Set Navigation Response: {response}")
         _check_response_for_errors(response)
-        token.device_id = self._get_device_id(self._get_stamp())
         return response["msgId"]
 
+    def refresh_access_token(self, token: Token) -> Token:
+        """Refresh access token using the stored refresh token.
+
+        Uses the OAuth2 refresh_token grant to get a new access token
+        without repeating the full login flow. Falls back to full login
+        if the refresh token is missing or the exchange fails.
+
+        Calls the v1 oauth2/token endpoint with grant_type=refresh_token.
+        Shared by AU, IN and CN (all use the same endpoint format).
+        KiaUvoApiEU overrides this with a v2 endpoint that uses a JSON
+        body instead of form-urlencoded.
+
+        No Stamp header is sent. CN's existing _get_refresh_token already
+        omits Stamp and works, which shows the refresh_token grant on this
+        endpoint family does not require it. AU and IN's existing
+        _get_refresh_token do send Stamp, but that appears to be carried
+        over from _get_access_token (authorization_code grant) rather than
+        required for the refresh_token grant. If an AU/IN server turns
+        out to require Stamp, this call fails and falls back to
+        self.login() — no worse than the pre-PR behaviour. A Stamp-adding
+        override can be re-introduced per region once confirmed with live
+        credentials.
+        """
+        if token.refresh_token:
+            try:
+                url = self.USER_API_URL + "oauth2/token"
+                headers = {
+                    "Authorization": self.BASIC_AUTHORIZATION,
+                    "Content-type": "application/x-www-form-urlencoded",
+                    "Host": self.BASE_URL,
+                    "Connection": "close",
+                    "Accept-Encoding": "gzip, deflate",
+                    "User-Agent": USER_AGENT_OK_HTTP,
+                }
+                data = "grant_type=refresh_token&refresh_token=" + token.refresh_token
+                response = self.session.post(url, data=data, headers=headers)
+                response_json = response.json()
+                _check_response_for_errors(response_json)
+
+                token_type = response_json["token_type"]
+                access_token = token_type + " " + response_json["access_token"]
+                new_refresh_token = response_json.get(
+                    "refresh_token", token.refresh_token
+                )
+                expires_in = int(response_json.get("expires_in", 86400))
+
+                valid_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+                    seconds=expires_in
+                )
+
+                _LOGGER.debug(
+                    f"{DOMAIN} - Access token refreshed successfully, "
+                    f"expires in {expires_in}s"
+                )
+
+                return Token(
+                    username=token.username,
+                    password=token.password,
+                    access_token=access_token,
+                    refresh_token=new_refresh_token,
+                    device_id=token.device_id,
+                    valid_until=valid_until,
+                    pin=token.pin,
+                )
+            except Exception:
+                _LOGGER.warning(
+                    f"{DOMAIN} - Refresh token exchange failed, "
+                    "falling back to full login"
+                )
+        return self.login(token.username, token.password, token.pin)
+
     def _get_control_token(self, token: Token) -> Token:
+        # Return cached control token if still valid
+        if token.control_token is not None and token.control_token_expiry > time.time():
+            return token.control_token, token.control_token_expiry
+
         url = self.USER_API_URL + "pin?token="
         headers = {
             "Authorization": token.access_token,
@@ -1119,7 +1295,7 @@ class ApiImplType1(ApiImpl):
         }
 
         data = {"deviceId": token.device_id, "pin": token.pin}
-        response = requests.put(url, json=data, headers=headers)
+        response = self.session.put(url, json=data, headers=headers)
         response = response.json()
         if response.get("controlToken") is None:
             _LOGGER.debug(f"{DOMAIN} - Get Control Token Response {response}")
@@ -1128,6 +1304,9 @@ class ApiImplType1(ApiImpl):
         control_token_expire_at = math.floor(
             dt.datetime.now().timestamp() + response["expiresTime"]
         )
+        # Cache control token and expiry for reuse
+        token.control_token = control_token
+        token.control_token_expiry = control_token_expire_at
         return control_token, control_token_expire_at
 
     def _set_session_language(self, cookies) -> None:
@@ -1135,4 +1314,4 @@ class ApiImplType1(ApiImpl):
         url = self.USER_API_URL + "language"
         headers = {"Content-type": "application/json"}
         payload = {"lang": self.LANGUAGE}
-        _ = requests.post(url, json=payload, headers=headers, cookies=cookies)
+        _ = self.session.post(url, json=payload, headers=headers, cookies=cookies)

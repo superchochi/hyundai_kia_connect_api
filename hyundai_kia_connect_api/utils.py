@@ -3,7 +3,29 @@
 
 import datetime
 import re
-from typing import Optional
+from enum import IntEnum
+from typing import Any, TypeVar
+
+
+T = TypeVar("T", bound=IntEnum)
+
+
+def to_int_enum(enum_class: type[T], value: str | int | T | None) -> T | None:
+    """Convert string, int, or existing IntEnum to the specified IntEnum type.
+
+    Handles "1" -> 1 -> WINDOW_STATE.OPEN conversions.
+    Returns None if value is None.
+    """
+    if value is None:
+        return None
+    if isinstance(value, enum_class):
+        return value
+    try:
+        # Convert string to int if needed
+        int_value = int(value) if isinstance(value, str) else value
+        return enum_class(int_value)
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"Invalid {enum_class.__name__} value: {value}") from e
 
 
 def get_child_value(data, key):
@@ -19,6 +41,23 @@ def get_child_value(data, key):
     return value
 
 
+def window_is_open(
+    state: dict[str, Any], open_key: str, open_level_key: str
+) -> bool | None:
+    """Whether a CCS2 window is open (fully open or vented).
+
+    CCS2 status exposes ``Open`` (fully-open flag) and ``OpenLevel`` (vent
+    level). A vented window reports ``Open=0`` with ``OpenLevel>0``; that must
+    be treated as open, not closed (see issue #1215). Returns ``None`` when
+    both fields are absent so callers can distinguish "unknown" from "closed".
+    """
+    open_value = get_child_value(state, open_key)
+    open_level = get_child_value(state, open_level_key)
+    if open_value is None and open_level is None:
+        return None
+    return bool(open_value) or bool(open_level)
+
+
 def get_float(value):
     if value is None:
         return None
@@ -32,6 +71,16 @@ def get_float(value):
         except ValueError:
             return value  # original fallback
     return value  # original fallback
+
+
+def float_or_none(value: str | int | float | None) -> float | None:
+    """Coerce to float; return None for missing or non-numeric values."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):  # fmt: skip
+        return None
 
 
 def get_hex_temp_into_index(value):
@@ -63,7 +112,7 @@ def parse_datetime(value, timezone) -> datetime.datetime:
 
         if timezone:
             # First, make it aware of UTC since 'GMT' implies UTC
-            utc_dt = dt_object.replace(tzinfo=datetime.timezone.utc)
+            utc_dt = dt_object.replace(tzinfo=datetime.UTC)
             # Then convert to the target timezone
             return utc_dt.astimezone(timezone)
         else:
@@ -99,7 +148,7 @@ def detect_timezone_for_date(
     date: datetime.datetime,
     ref_date: datetime.datetime,
     timezones: list[datetime.timezone],
-) -> Optional[datetime.timezone]:
+) -> datetime.timezone | None:
     """
     Guess an appropriate timezone given a date with an unknown timezone and a
     nearby reference time in any valid timezone.

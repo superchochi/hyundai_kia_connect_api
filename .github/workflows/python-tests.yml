@@ -15,10 +15,10 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
-                python-version: ["3.12"]
+                python-version: ["3.12", "3.13", "3.14"]
 
         steps:
-            - uses: actions/checkout@v6
+            - uses: actions/checkout@v7
               with:
                   ref: ${{github.event.pull_request.head.ref}}
                   repository: ${{github.event.pull_request.head.repo.full_name}}

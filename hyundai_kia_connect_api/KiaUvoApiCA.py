@@ -137,14 +137,25 @@ class KiaUvoApiCA(ApiImpl):
             "client_secret": "CLISCR01AHSPA",
         }
         self._sessions = None
+        # Cached device_id. Seeded from the persisted Token by refresh_access_token
+        # (so re-login reuses it), or computed once from MAC+hostname on first login.
+        self._device_id: str | None = None
 
     def _get_device_id(self) -> str:
-        """Generate a deterministic device ID based on MAC address and hostname.
-        This ensures the same device ID is used across sessions, avoiding OTP triggers."""
-        device_uuid = uuid.uuid5(
-            uuid.NAMESPACE_DNS, f"{uuid.getnode():x}-{platform.node() or ''}"
-        )
-        return base64.b64encode(device_uuid.hex.encode()).decode()
+        """Return a stable device ID, persisted across re-logins.
+
+        Reuse the cached device_id if set (seeded from the persisted Token by
+        refresh_access_token, or computed on first login). Otherwise derive it
+        deterministically from MAC+hostname (uuid5) and cache it. Caching means
+        a Docker restart with a changed MAC/hostname no longer produces a new
+        device_id the server does not recognize (kia_uvo#1715).
+        """
+        if self._device_id is None:
+            device_uuid = uuid.uuid5(
+                uuid.NAMESPACE_DNS, f"{uuid.getnode():x}-{platform.node() or ''}"
+            )
+            self._device_id = base64.b64encode(device_uuid.hex.encode()).decode()
+        return self._device_id
 
     def get_implementation_by_region_brand(self, region, brand, language):
         return KiaUvoApiCA(region, brand, language)
@@ -156,21 +167,23 @@ class KiaUvoApiCA(ApiImpl):
         return self._sessions
 
     def _check_response_for_errors(self, response: dict) -> None:
-        """
-        Checks for errors in the API response.
+        """Checks for errors in the API response.
+
         If an error is found, an exception is raised.
         retCode known values:
         - S: success
         - F: failure
         resCode / resMsg known values:
         - 0000: no error
-        - 7110: "OTP Required" (MFA verification needed)
-        - 7402: "Account Locked Out"
-        - 7403: "Your authentication has expired"
-        - 7404: "Wrong Username and password"
-        - 7445: "Your request could not be processed"
-        - 7602: "Access token is deleted"
-        - 7710 : "Device ID is not valid"
+        - 7110: OTP Required (MFA verification needed)
+        - 7402: Account Locked Out
+        - 7403: Authentication expired
+        - 7404: Wrong username/password
+        - 7445: Request could not be processed
+        - 7549: OTP verification failed (Genesis CA)
+        - 7602: Access token deleted
+        - 7710: Device ID is not valid
+
         :param response: the API's JSON response
         """
 
@@ -178,6 +191,7 @@ class KiaUvoApiCA(ApiImpl):
             "7404": AuthenticationError,
             "7402": AuthenticationError,
             "7403": AuthenticationError,  # Auth expired - triggers re-login
+            "7549": AuthenticationError,  # OTP verification failed (Genesis CA)
             "7602": AuthenticationError,  # Access token deleted - triggers re-login
         }
         if response["responseHeader"]["responseCode"] == 1:
@@ -186,10 +200,12 @@ class KiaUvoApiCA(ApiImpl):
                 return
             if response["error"]["errorCode"] in error_code_mapping:
                 raise error_code_mapping[response["error"]["errorCode"]](
-                    response["error"]["errorDesc"]
+                    response["error"].get("errorDesc", response["error"]["errorCode"])
                 )
             else:
-                raise APIError(f"Server returned: '{response['error']['errorDesc']}'")
+                raise APIError(
+                    f"Server returned: '{response['error'].get('errorDesc', response['error'].get('errorCode', 'unknown'))}'"
+                )
 
     def login(
         self,
@@ -273,8 +289,23 @@ class KiaUvoApiCA(ApiImpl):
             password=password,
             access_token=access_token,
             refresh_token=refresh_token,
+            device_id=self._device_id,
             valid_until=valid_until,
             pin=pin,
+        )
+
+    def refresh_access_token(self, token: Token) -> Token | OTPRequest:
+        """Refresh the token. CA has no refresh endpoint, so this re-logs-in.
+
+        Carry forward the persisted device_id so the server still recognizes
+        the device and does not trigger OTP (kia_uvo#1715). When the Token has
+        no device_id (first run after upgrade from a pre-fix install), fall back
+        to the deterministic uuid5(MAC+hostname) computed inside login().
+        """
+        if token.device_id:
+            self._device_id = token.device_id
+        return self.login(
+            username=token.username, password=token.password, pin=token.pin
         )
 
     def send_otp(self, otp_request: OTPRequest, notify_type: OTP_NOTIFY_TYPE) -> None:
@@ -385,6 +416,7 @@ class KiaUvoApiCA(ApiImpl):
             password=password,
             access_token=access_token,
             refresh_token=refresh_token,
+            device_id=self._device_id,
             valid_until=valid_until,
             pin=pin,
         )
@@ -593,18 +625,18 @@ class KiaUvoApiCA(ApiImpl):
         vehicle.side_mirror_heater_is_on = get_child_value(
             state, "status.sideMirrorHeat"
         )
-        vehicle.front_left_seat_status = SEAT_STATUS[
+        vehicle.front_left_seat_status = SEAT_STATUS.get(
             get_child_value(state, "status.seatHeaterVentState.flSeatHeatState")
-        ]
-        vehicle.front_right_seat_status = SEAT_STATUS[
+        )
+        vehicle.front_right_seat_status = SEAT_STATUS.get(
             get_child_value(state, "status.seatHeaterVentState.frSeatHeatState")
-        ]
-        vehicle.rear_left_seat_status = SEAT_STATUS[
+        )
+        vehicle.rear_left_seat_status = SEAT_STATUS.get(
             get_child_value(state, "status.seatHeaterVentState.rlSeatHeatState")
-        ]
-        vehicle.rear_right_seat_status = SEAT_STATUS[
+        )
+        vehicle.rear_right_seat_status = SEAT_STATUS.get(
             get_child_value(state, "status.seatHeaterVentState.rrSeatHeatState")
-        ]
+        )
         # Additional status fields observed in logs (exposed as binary sensors)
         vehicle.accessory_on = get_child_value(state, "status.acc")
         vehicle.ign3 = get_child_value(state, "status.ign3")
@@ -621,6 +653,18 @@ class KiaUvoApiCA(ApiImpl):
         )
         vehicle.headlamp_right_low = get_child_value(
             state, "status.lampWireStatus.headLamp.rightLowLamp"
+        )
+        vehicle.headlamp_left_high = get_child_value(
+            state, "status.lampWireStatus.headLamp.leftHighLamp"
+        )
+        vehicle.headlamp_right_high = get_child_value(
+            state, "status.lampWireStatus.headLamp.rightHighLamp"
+        )
+        vehicle.headlamp_left_bifunc = get_child_value(
+            state, "status.lampWireStatus.headLamp.leftBifuncLamp"
+        )
+        vehicle.headlamp_right_bifunc = get_child_value(
+            state, "status.lampWireStatus.headLamp.rightBifuncLamp"
         )
         vehicle.stop_lamp_left = get_child_value(
             state, "status.lampWireStatus.stopLamp.leftLamp"
