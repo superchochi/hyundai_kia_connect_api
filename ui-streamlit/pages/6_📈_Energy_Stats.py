@@ -25,11 +25,10 @@ st.title("📈 Energy Statistics")
 st.caption(f"{vehicle.name} · {vehicle.model}")
 
 # ── Lifetime & 30-day summary ──────────────────────────────────────────────────
-has_ev_energy = any([
-    vehicle.total_power_consumed,
-    vehicle.total_power_regenerated,
-    vehicle.power_consumption_30d,
-])
+has_ev_energy = any(
+    v is not None
+    for v in [vehicle.total_power_consumed, vehicle.total_power_regenerated, vehicle.power_consumption_30d]
+)
 
 if has_ev_energy:
     st.subheader("⚡ Lifetime & 30-Day Energy")
@@ -90,11 +89,11 @@ k_cols = st.columns(4)
 with k_cols[0]:
     st.metric("Total Distance", fmt_distance(recent["Distance"].sum(), vehicle.odometer_unit))
 with k_cols[1]:
-    st.metric("Total Consumed", fmt_energy(int(recent["Total (Wh)"].sum())))
+    st.metric("Total Consumed", fmt_energy(int(recent["Total (Wh)"].fillna(0).sum())))
 with k_cols[2]:
-    st.metric("Total Regenerated", fmt_energy(int(recent["Regenerated (Wh)"].sum())))
+    st.metric("Total Regenerated", fmt_energy(int(recent["Regenerated (Wh)"].fillna(0).sum())))
 with k_cols[3]:
-    net = recent["Total (Wh)"].sum() - recent["Regenerated (Wh)"].sum()
+    net = recent["Total (Wh)"].fillna(0).sum() - recent["Regenerated (Wh)"].fillna(0).sum()
     st.metric("Net Consumption", fmt_energy(int(net)))
 
 st.divider()

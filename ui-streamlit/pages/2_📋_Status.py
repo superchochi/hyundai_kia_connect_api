@@ -178,6 +178,14 @@ with tabs[3]:
             st.markdown(fmt_val(vehicle.headlamp_status, fallback="—"))
             st.markdown(f"Left low: {status_dot(vehicle.headlamp_left_low)}")
             st.markdown(f"Right low: {status_dot(vehicle.headlamp_right_low)}")
+            if vehicle.headlamp_left_high is not None:
+                st.markdown(f"Left high: {status_dot(vehicle.headlamp_left_high)}")
+            if vehicle.headlamp_right_high is not None:
+                st.markdown(f"Right high: {status_dot(vehicle.headlamp_right_high)}")
+            if vehicle.headlamp_left_bifunc is not None:
+                st.markdown(f"Left bifunc: {status_dot(vehicle.headlamp_left_bifunc)}")
+            if vehicle.headlamp_right_bifunc is not None:
+                st.markdown(f"Right bifunc: {status_dot(vehicle.headlamp_right_bifunc)}")
         with l_cols[1]:
             st.markdown("**Stop Lamps**")
             st.markdown(f"Left: {status_dot(vehicle.stop_lamp_left)}")

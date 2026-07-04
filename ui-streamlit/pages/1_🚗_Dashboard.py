@@ -54,7 +54,7 @@ with cols[2]:
     elif vehicle.total_driving_range is not None:
         st.metric("Range", fmt_distance(vehicle.total_driving_range, vehicle.total_driving_range_unit))
     elif vehicle.fuel_driving_range is not None:
-        st.metric("Fuel Range", fmt_distance(vehicle.fuel_driving_range, vehicle.fuel_driving_range_unit))
+        st.metric("Fuel Range", fmt_distance(vehicle.fuel_driving_range, vehicle._fuel_driving_range_unit))
     else:
         st.metric("Range", "—")
 

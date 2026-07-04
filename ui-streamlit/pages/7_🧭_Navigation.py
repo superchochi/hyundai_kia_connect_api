@@ -18,6 +18,14 @@ vehicle = render_sidebar()
 if vehicle is None:
     st.stop()
 
+brand = st.session_state.get("_brand")
+region = st.session_state.get("_region")
+# Europe=1, China=4, Australia=5, India=6 (from const.REGIONS)
+SUPPORTED_NAV_REGIONS = {1, 4, 5, 6}
+if brand != 1 or region not in SUPPORTED_NAV_REGIONS:
+    st.warning("Navigation is only available for Kia vehicles in Europe, Australia, China, and India.")
+    st.stop()
+
 vm = get_vm()
 st.title("🧭 Navigation")
 st.caption(f"{vehicle.name} · {vehicle.model}")
